@@ -57,11 +57,163 @@ class MicroCmsNotifier extends _$MicroCmsNotifier {
 
 3. インフラストラクチャ層：この層はアプリケーションの永続性の詳細（データベース操作など）やネットワーク通信などを担当します。この層はアプリケーション層に依存します。
 
+```dart
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:onion_architecture/domain/blog_state.dart';
+import 'package:onion_architecture/core/logger.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'micro_cms_api.g.dart';
+/*
+status codeによってエラーを返すEnum。
+今回は、HTTP GETだけなので、200かそれ以外かの2つだけ。
+*/
+enum MicroCMSApiStatus {
+  success,
+  serverError,
+  networkError,
+}
+// ロジックを書いてないインターフェースを作って祖結合にしてみた。
+abstract interface class MicroCMS {
+  Future<List<ResponseModel>> getCategories();
+}
+// Riverpod1系だと、Providerを使う。
+// final microCMSApiImplProvider = Provider<MicroCMSApiImpl>((ref) {
+//   return MicroCMSApiImpl();
+// });
+
+// 状態が破棄されないように、keepAliveをtrueにしている。
+@Riverpod(keepAlive: true)
+MicroCMSApiImpl microCMSApiImpl(MicroCMSApiImplRef ref) {
+  return MicroCMSApiImpl();
+}
+
+// MicroCMSApiImplクラスは、MicroCMSインターフェースを実装している。
+class MicroCMSApiImpl implements MicroCMS {
+  final baseUrl = 'https://xityyp5xvg.microcms.io/api/v1/blogs';
+
+  @override
+  Future<List<ResponseModel>> getCategories() async {
+    try {
+      final response = await http.get(
+        Uri.parse(baseUrl),
+        headers: {// .envファイルからAPIキーを取得
+          'X-MICROCMS-API-KEY': dotenv.env['MICROCMS_API_KEY'] ?? '',
+        },
+      );
+      // Enumを使って、ステータスコードによってエラーを返す。
+      switch (response.statusCode) {
+        case 200:// 200の場合は、成功なので、データを返す。
+          final data = jsonDecode(response.body) as Map<String, dynamic>;
+          if (data.containsKey('contents') && data['contents'] is List) {
+            final contents = data['contents'] as List;
+            logger.d('API Response👻: $contents');
+            return contents
+                .map((content) => ResponseModel.fromJson(content))
+                .toList();
+          } else {
+            throw Exception('contents field is missing or null in data');
+          }
+        case 500:// 500の場合は、サーバーエラーなので、エラーを返す。
+          throw MicroCMSApiStatus.serverError;
+        default:// それ以外の場合は、ネットワークエラーなので、エラーを返す。
+          throw MicroCMSApiStatus.networkError;
+      }
+    } catch (e) {
+      // 例外が発生した場合は、Exceptionなので、エラーを返す。
+      if (e is MicroCMSApiStatus) {
+        throw Exception(e);
+      } else {
+        // network errorの場合は、enumのnetworkErrorを返す。
+        throw MicroCMSApiStatus.networkError;
+      }
+    }
+  }
+}
+```
+
 4. プレゼンテーション層：これはユーザーインターフェース（UI）を含む層で、ユーザーとの対話を管理します。この層はアプリケーション層に依存します。
 
 このアーキテクチャの主な利点は、各層が独立しているため、変更やテストが容易であること、そして各層が特定の責任を持っているため、コードが整理されやすいことです。
 
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:onion_architecture/application/micro_cms_state.dart';
+import 'package:onion_architecture/presentation/detail_page.dart';
+
+// MicroCMSのデータを表示するページ
+class BlogPage extends ConsumerWidget {
+  const BlogPage({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // APIからのデータは、`AsyncValue`のデータ型で渡されてくる
+    final microCms = ref.watch(microCmsStateProvider);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(dotenv.env['HI'] ?? ''),// .envからテキストを取得
+      ),
+      body: microCms.when(
+        data: (cms) {
+          return Padding(
+            padding: const EdgeInsets.only(top: 12.0),
+            child: ListView.builder(
+              itemCount: cms.length,
+              itemBuilder: (context, index) {
+                final title = cms[index].title;
+                return ListTile(
+                  // Listをタップしたら、詳細ページに遷移する
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            DetailPage(responseModel: cms[index]),
+                      ),
+                    );
+                  },
+                  // アバター画像を表示
+                  leading: cms[index].eyecatch != null
+                      ? Padding(
+                          padding: const EdgeInsets.only(top: 4.0, bottom: 4.0),
+                          child: SizedBox(
+                              width: 100,
+                              height: 100,
+                              child: Image.network(cms[index].eyecatch!.url)),
+                        )
+                      : null,
+                  title: Text(title!),// ブログのタイトルを表示
+                );
+              },
+            ),
+          );
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (err, stack) => Center(child: Text('Error: $err')),
+      ),
+    );
+  }
+}
+```
+
 coreについてですが、ここには、`logger`とかコンバーターのコードを置くそうです。
+
+```dart
+import 'package:logger/logger.dart';
+/// [print文は使わずに、logger.d('')などでログを出力する]
+final logger = Logger(
+  printer: PrettyPrinter(
+      methodCount: 2, // 表示するメソッド呼び出し数
+      errorMethodCount: 8, // スタックトレースが提供される場合のメソッド呼び出し数
+      lineLength: 120, // 出力の幅
+      colors: true, // カラフルなログメッセージ
+      printEmojis: true, // ログメッセージに絵文字を表示する
+      printTime: false // 各ログ出力にタイムスタンプを含める
+  ),
+);
+```
 
 📁このアプリのディレクトリ構成:
 ```
